@@ -11,6 +11,7 @@ Maps linode api entities to a fuse filesystem.
 ./setup.py install --user
  mkdir mnt
  read LINODE_API_KEY
+ export LINODE_API_KEY
 
  # I rerun this line after each change to linodefs.py
  # .. and hoping each time that this leap will be the leap home.
