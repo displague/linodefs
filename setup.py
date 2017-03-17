@@ -12,7 +12,7 @@ setup(
     url='https://github.com/displague/linodefs',
     license='MIT',
     packages=find_packages(),
-    install_requires=['linode'],
+    install_requires=['future'],
     scripts=['linodefs.py',],
     classifiers=[
       'Development Status :: 1 - Planning',

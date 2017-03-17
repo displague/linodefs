@@ -5,7 +5,7 @@ import sys
 import stat
 import errno
 import logging
-import StringIO
+from io import StringIO
 
 try:
     import _find_fuse_parts
@@ -13,7 +13,9 @@ except ImportError:
     pass
 import fuse
 
-from linode import Api
+from linode import LinodeClient, LinodeLoginClient, StackScript, Distribution, Datacenter
+from linode import Service, OAuthScopes
+import config
 
 fuse.fuse_python_api = (0, 2)
 
@@ -45,10 +47,7 @@ class LinodeFS(fuse.Fuse):
         logging.debug("Starting LinodeFS")
 
     def make_connection(self):
-        if hasattr(self, 'api_url'):
-            API.endpoint = self.api_url
-
-        self._api = Api(self.api_key)
+        self._api = LinodeClient('no-token', base_url=self.api_base_url)
 
     def get_cached_linodes(self):
         if not self._linodes:
@@ -89,12 +88,12 @@ class LinodeFS(fuse.Fuse):
         st = LinodeFSStats()
 
         if path == '/':
-            st.st_mode = stat.S_IFDIR | 0755
+            st.st_mode = stat.S_IFDIR | 0o755
             st.st_nlink = 2
             return st
         elif path in self._objects_to_create:
             logging.debug("getattr(path='%s'): file is scheduled for creation" % (path))
-            st.st_mode = stat.S_IFREG | 0644
+            st.st_mode = stat.S_IFREG | 0o644
             st.st_nlink = 1
             st.st_size = 0
             return st
@@ -105,7 +104,7 @@ class LinodeFS(fuse.Fuse):
             linode_names = self._read_linode_names()
 
             if path_tokens[1] in linode_names:
-                st.st_mode = stat.S_IFDIR | 0755
+                st.st_mode = stat.S_IFDIR | 0o755
                 st.st_nlink = 2
                 return st
             else:
@@ -114,7 +113,7 @@ class LinodeFS(fuse.Fuse):
             obj = self._get_object(path_tokens)
 
             if obj:
-                st.st_mode = stat.S_IFREG | 0444
+                st.st_mode = stat.S_IFREG | 0o444
                 st.st_nlink = 1
                 st.st_size = obj.size
             else:
@@ -133,19 +132,30 @@ class LinodeFS(fuse.Fuse):
 
         if "/" == path:
             try:
-                linode_names = self._read_linode_names()
+                endpoints = ['linodes']
 
-                logging.debug("linode names = %s" % linode_names)
                 dirs = [".", ".."] + linode_names
 
-                logging.debug("dirs = %s" % dirs)
 
                 for r in  dirs:
-                    logging.debug("yielding %s" % r)
                     yield fuse.Direntry(r)
-                #return dirs
             except Exception:
                 logging.exception("exception in readdir()")
+                if "/linodes" == path:
+                    try:
+                        linode_names = self._read_linode_names()
+
+                        logging.debug("linode names = %s" % linode_names)
+                        dirs = [".", ".."] + linode_names
+
+                        logging.debug("dirs = %s" % dirs)
+
+                        for r in  dirs:
+                            logging.debug("yielding %s" % r)
+                            yield fuse.Direntry(r)
+                            #return dirs
+                    except Exception:
+                        logging.exception("exception in readdir()")
         else:
             path_tokens = path.split("/")
 
@@ -158,7 +168,7 @@ class LinodeFS(fuse.Fuse):
                 linode_name = path_tokens[1]
                 linode = self.get_linode_by_name(linode_name)
                 dirs = [".", "..","info"] +  [str('disk'+obj['DISKID']) for disk in
-                        self.api_handle.linode.disk.list({linodeid:linode['LINODEID']})]
+                                              self.api_handle.linode.disk.list({linodeid:linode['LINODEID']})]
 
                 logging.debug("dirs = %s" % dirs)
 
@@ -217,9 +227,9 @@ class LinodeFS(fuse.Fuse):
             object_name = path_tokens[2]
 
             self.api_handle.upload_object_via_stream(StringIO.StringIO('\n'),
-                    self.api_handle.get_container(container_name),
-                    object_name,
-                    extra={"content_type": "application/octet-stream"})
+                                                     self.api_handle.get_container(container_name),
+                                                     object_name,
+                                                     extra={"content_type": "application/octet-stream"})
             return 0
         except Exception:
             logging.exception("exception in mknod()")
@@ -234,12 +244,12 @@ class LinodeFS(fuse.Fuse):
             return -errno.EOPNOTSUPP
 
         try:
-#            obj = self._get_object(path_tokens)
-#            # we allow opening existing files in read-only mode
-#            if obj:
-#                accmode = os.O_RDONLY | os.O_WRONLY | os.O_RDWR
-#                if (flags & accmode) != os.O_RDONLY:
-#                    return -errno.EACCES
+            #            obj = self._get_object(path_tokens)
+            #            # we allow opening existing files in read-only mode
+            #            if obj:
+            #                accmode = os.O_RDONLY | os.O_WRONLY | os.O_RDWR
+            #                if (flags & accmode) != os.O_RDONLY:
+            #                    return -errno.EACCES
             return 0
         except Exception:
             logging.exception("exception in open()")
@@ -266,10 +276,10 @@ class LinodeFS(fuse.Fuse):
         if offset < slen:
             if offset + size > slen:
                 size = slen - offset
-            response = content[offset:offset+size]
-        else:
-            response = ''
-        return response
+                response = content[offset:offset+size]
+            else:
+                response = ''
+                return response
 
     def write(self, path, buff, offset):
         logging.debug("write(path='%s', buff=<skip>, offset='%s')" % (path, offset))
@@ -315,11 +325,11 @@ class LinodeFS(fuse.Fuse):
             if len(write_cache[path]) > 0:
                 self.unlink(path)
                 self.api_handle.upload_object_via_stream(StringIO.StringIO(''.join(write_cache[path])),
-                        self.api_handle.get_container(container_name),
-                        object_name,
-                        extra={"content_type": "application/octet-stream"})
+                                                         self.api_handle.get_container(container_name),
+                                                         object_name,
+                                                         extra={"content_type": "application/octet-stream"})
                 del write_cache[path]
-            return 0
+                return 0
         except KeyError:
             logging.warning("no cached entry for path: %s" % path)
             return 0
@@ -337,27 +347,58 @@ class LinodeFS(fuse.Fuse):
 
 def main():
     usage="""
-LinodeFS
+    LinodeFS
 
 """ + fuse.Fuse.fusage
     server = LinodeFS(version="%prog " + fuse.__version__,
-                     usage=usage,
-                     dash_s_do='setsingle')
+                  usage=usage,
+                  dash_s_do='setsingle')
 
-    server.parser.add_option(mountopt='api_key', metavar='API_KEY',
-            help=("API Key"))
-    server.parser.add_option(mountopt='api_url', metavar='API_URL',
-            help=("API URL"))
+    server.parser.add_option(mountopt='api_token', metavar='API_TOKEN',
+                             help=("API Token"))
+    server.parser.add_option(mountopt='api_base_url', metavar='API_BASE_URL',
+                             help=("API URL"))
     server.parse(values=server, errex=1)
 
-    if not (hasattr(server, 'api_key')):
-        print >>sys.stderr, "Please specify an API Key."
+    if not (hasattr(server, 'api_token')):
+        print >>sys.stderr, "Please specify an API Token."
         sys.exit(1)
+
+    login_client = LinodeLoginClient(config.client_id, config.client_secret, base_url=config.login_base_url)
+    url = login_client.generate_login_url(scopes=OAuthScopes.Linodes.all)
+
+    port = 11001
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind((host, port))
+    sock.listen(1)
+
+    system("open %s".format(url))
+    print("Waiting for your browser. Press Ctrl+C if the Linode Login fails\n");
+    while True:
+        csock, caddr = sock.accept()
+        print("Connection from: %s".format(caddr.repr()))
+        req = csock.recv(1024)
+        match = re.match('GET /auth_callback\?code=(\d+)\sHTTP/1', req)
+        if match:
+            code = match.group(1)
+            print("ANGLE: " + code + "\n")
+            csock.sendall("""HTTP/1.0 200 OK\nContent-Type: text/html\n\n
+                          <html><head><title>Success</title></head>
+                          <body>Authorized</body></html>
+                          """)
+        else:
+            # If there was no
+            # recognised command then
+            # return a 404 (page not
+            # found)
+            print("Returning 404")
+            csock.sendall("HTTP/1.0 404 Not Found\r\n")
+            csock.close()
 
     try:
         server.make_connection()
-    except Exception, err:
-        print >>sys.stderr, "Cannot connect to Linode API: %s" % str(err)
+    except Exception as err:
+        print("Cannot connect to Linode API: %s".format(err), file=sys.stderr)
         sys.exit(1)
 
     server.main()
